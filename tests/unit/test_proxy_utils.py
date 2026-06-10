@@ -6389,6 +6389,64 @@ async def test_service_stream_responses_records_typeless_raw_codex_error_first(m
 
 
 @pytest.mark.asyncio
+async def test_stream_once_records_top_level_raw_codex_error_first(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_top_level_raw_error_first")
+    settlement = proxy_service._StreamSettlement()
+    raw_error_line = 'data: {"type":"error","code":"rate_limit_exceeded","message":"OpenCode stream failed"}\n\n'
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        enforce_openai_sdk_contract=True,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, enforce_openai_sdk_contract
+        yield raw_error_line
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+        }
+    )
+
+    chunks: list[str] = []
+    with pytest.raises(proxy_service._TerminalStreamError) as exc_info:
+        async for chunk in service._stream_once(
+            account,
+            payload,
+            {"session_id": "sid-stream"},
+            "req_stream_top_level_raw_error_first",
+            False,
+            request_started_at=0.0,
+            api_key=None,
+            api_key_reservation=None,
+            settlement=settlement,
+            suppress_text_done_events=False,
+            upstream_stream_transport=None,
+            request_transport="http",
+            enforce_openai_sdk_contract=False,
+        ):
+            chunks.append(chunk)
+
+    assert chunks == [raw_error_line]
+    assert exc_info.value.code == "rate_limit_exceeded"
+    assert exc_info.value.error == {"message": "OpenCode stream failed"}
+    assert settlement.status == "error"
+    assert settlement.error == {"message": "OpenCode stream failed"}
+    assert settlement.account_health_error is True
+
+
+@pytest.mark.asyncio
 async def test_service_stream_responses_records_typeless_raw_codex_error_after_created(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
